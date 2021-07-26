@@ -11,7 +11,7 @@
 {-# LANGUAGE ViewPatterns #-}
 
 module Data.Matrix.Sparse
-       ( Matrix(..), cmap, scale, nonZero, slice
+       ( Matrix(..), cmap, scale, nonZero, slice, unsafeSlice
        , compress, decompress, dedupInPlace
        , fromTriples, (><)
        , transpose, ctrans, hermitian

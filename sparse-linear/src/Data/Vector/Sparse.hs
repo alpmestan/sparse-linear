@@ -11,7 +11,7 @@ module Data.Vector.Sparse
        , fromPairs, (|>), unsafeFromPairs
        , lin, glin
        , iforM_
-       ) where
+       ,(!)) where
 
 #if __GLASGOW_HASKELL__ < 710
 import Control.Applicative
@@ -32,6 +32,11 @@ data Vector v a
            , values :: v a
            }
   deriving (Eq, Show)
+
+(!) :: (G.Vector v a, Num a) => Vector v a -> Int -> a
+(!) v i = case U.findIndex (==i) (indices v) of
+  Nothing -> 0
+  Just ix -> values v G.! ix
 
 null :: Vector v a -> Bool
 {-# INLINE null #-}
@@ -131,12 +136,12 @@ instance (G.Vector v a, Num a) => Num (Vector v a) where
   signum = omap signum
   fromInteger = error "Data.Vector.Sparse.fromInteger: not implemented"
 
+instance G.Vector v a => Semigroup (Vector v a) where
+  a <> b = mconcat [a, b]
+
 instance G.Vector v a => Monoid (Vector v a) where
   {-# INLINE mempty #-}
   mempty = Vector 0 U.empty G.empty
-
-  {-# INLINE mappend #-}
-  mappend a b = mconcat [a, b]
 
   {-# INLINE mconcat #-}
   mconcat xs

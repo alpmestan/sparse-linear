@@ -2,11 +2,13 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 
+{-# LANGUAGE ScopedTypeVariables #-}
 module Main (main) where
 
 #if __GLASGOW_HASKELL__ < 710
 import Control.Applicative
 #endif
+import Data.Reflection
 import Data.Vector.Unboxed (Vector)
 import qualified Data.Vector.Unboxed as V
 import System.IO.Unsafe (unsafePerformIO)
@@ -16,6 +18,8 @@ import Test.QuickCheck
 import Data.Matrix.Sparse
 import Data.Matrix.Sparse.Foreign
 import Test.LinearAlgebra
+import Data.Proxy
+import qualified Data.Matrix.Sparse.Static as St
 
 main :: IO ()
 main = hspec $ do
@@ -139,6 +143,12 @@ main = hspec $ do
     it "fromForeign . withConstMatrix == id"
       (property (prop_withConstFromForeign :: Matrix Vector Int -> Bool))
 
+  describe "Data.Matrix.Sparse.Static" $ do
+    it "fromList . toList == id"
+      (property prop_static_fromto_list)
+    it "imap (\\_ _ -> id) == id"
+      (property prop_static_imap_id)
+
 prop_withConstFromForeign
   :: (Eq a, Num a, Storable a, Unbox a) => Matrix Vector a -> Bool
 prop_withConstFromForeign mat =
@@ -176,3 +186,19 @@ arbitraryAdd3 = do
   b <- arbitraryMatrix (nrows a) (ncols a)
   c <- arbitraryMatrix (nrows a) (ncols a)
   return (a, b, c)
+
+prop_static_fromto_list :: Property
+prop_static_fromto_list = property $ do
+  (n, p) <- (,) <$> arbdim <*> arbdim
+  reifyNat (fromIntegral n) $ \(_pn :: Proxy n) ->
+    reifyNat (fromIntegral p) $ \(_pp :: Proxy p) -> do
+    (m :: St.Matrix n p Vector Double) <- St.Matrix <$> arbitraryMatrix n p
+    return $ St.fromList (St.toList m) == m
+
+prop_static_imap_id :: Property
+prop_static_imap_id = property $ do
+  (n, p) <- (,) <$> arbdim <*> arbdim
+  reifyNat (fromIntegral n) $ \(_pn :: Proxy n) ->
+    reifyNat (fromIntegral p) $ \(_pp :: Proxy p) -> do
+    (m :: St.Matrix n p Vector Double) <- St.Matrix <$> arbitraryMatrix n p
+    return $ St.imap (\_ _ v -> v) m == m
