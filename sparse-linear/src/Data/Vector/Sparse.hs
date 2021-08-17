@@ -11,7 +11,7 @@ module Data.Vector.Sparse
        , fromPairs, (|>), unsafeFromPairs
        , lin, glin
        , iforM_
-       ,(!)) where
+       ,(!),dot) where
 
 #if __GLASGOW_HASKELL__ < 710
 import Control.Applicative
@@ -121,6 +121,9 @@ lin :: (G.Vector u a, G.Vector v a, G.Vector w a, Num a)
 {-# INLINE lin #-}
 lin a0 as b0 bs = glin 0 (\c a -> a0 * a + c) as (\c b -> b0 * b + c) bs
 
+dot :: (G.Vector u a, Num a) => Vector u a -> Vector u a -> a
+dot u v = G.sum $ values (u * v)
+
 instance (G.Vector v a, Num a) => Num (Vector v a) where
   {-# INLINE (+) #-}
   {-# INLINE (*) #-}
@@ -129,7 +132,7 @@ instance (G.Vector v a, Num a) => Num (Vector v a) where
   {-# INLINE abs #-}
   {-# INLINE signum #-}
   (+) as bs = glin 0 (+) as (+) bs
-  (*) as bs = glin 0 (+) as (*) bs
+  (*) as bs = glin 0 (*) as (*) bs
   (-) as bs = glin 0 (+) as (-) bs
   negate = omap negate
   abs = omap abs

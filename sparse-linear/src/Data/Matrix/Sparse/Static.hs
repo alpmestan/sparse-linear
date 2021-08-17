@@ -14,9 +14,11 @@ import qualified Data.Vector.Unboxed         as V
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.STRef.Strict
 import Data.MonoTraversable (Element)
-import Control.Monad (forM_, when)
 import qualified Data.Vector.Sparse.Static as SV
-import Debug.Trace (trace, traceShow)
+import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Storable.Mutable as MVS
+import qualified Data.Vector.Generic as VG
+import Control.Monad (forM_)
 
 newtype Matrix (n :: Nat) (p :: Nat) a = Matrix (M.Matrix V.Vector a)
   deriving (Eq, Show, Read)
@@ -103,14 +105,12 @@ imap f (Matrix m) = Matrix $ m { M.values = values' }
   where values' = runST (go 0 0 =<< MV.unsafeNew n :: ST s (Vector b))
         n = V.length vs
         vs = M.values m
-        vs_len = V.length vs
         rowIds = M.indices m
         colIds = M.pointers m
-        colIds_len = V.length colIds
-        go :: Int -> Int -> MV.MVector s b -> ST s (Vector b)
+        go :: forall s. Int -> Int -> MV.MVector s b -> ST s (Vector b)
         go !col !valIdx mv
           -- we've processed all values (and/or all columns)
-           | valIdx >= vs_len || col >= colIds_len = V.unsafeFreeze mv
+           | valIdx >= n = V.unsafeFreeze mv
           -- no nnz element in this column
            | (colIds V.! col) == (colIds V.! (col+1)) = go (col+1) valIdx mv
           -- otherwise, we've got some work to do
@@ -122,218 +122,9 @@ imap f (Matrix m) = Matrix $ m { M.values = values' }
                 MV.unsafeWrite mv (valIdx+i) (f row col v)
               go (col+1) (valIdx+elemsInCol) mv
 
-{-# INLINE izipR #-}
--- an indexed-zip where the result will have the same structure as the 2nd
--- Matrix argument
-izipR
-  :: forall (n :: Nat) (p :: Nat) a b c.
-     (MV.Unbox a, MV.Unbox b, MV.Unbox c)
-  => a
-  -> (Int -> Int -> a -> b -> c)
-  -> Matrix n p a
-  -> Matrix n p b
-  -> Matrix n p c
-izipR za f (Matrix m1) (Matrix m2) = Matrix $ M.Matrix
-  { M.ncols = ncols
-  , M.nrows = M.nrows m2
-  , M.pointers = colIds2
-  , M.indices = rowIds2
-  , M.values = vs
-  }
-
-  where ncols = M.ncols m2
-        nvals2 = V.length vals2
-        rowIds2 = M.indices m2
-        rowIds1 = M.indices m1
-        colIds1 = M.pointers m1
-        colIds2 = M.pointers m2
-        vals2 = M.values m2
-        vals1 = M.values m1
-        vs = runST $ do
-          mvs <- MV.unsafeNew nvals2
-          go 0 0 0 mvs
-          V.unsafeFreeze mvs
-
-        go :: forall s.
-              Int -> Int -> Int
-           -> MV.MVector s c
-           -> ST s ()
-        go !col !valIdx1 !valIdx2 mv
-          | (valIdx2 >= nvals2) = return ()
-          | (colIds2 V.! col) == (colIds2 V.! (col+1)) = do
-              let elemsInCol1 = (colIds1 V.! (col+1)) - (colIds1 V.! col)
-              go (col+1) (valIdx1+elemsInCol1) valIdx2 mv
-          | otherwise = do
-              let !elemsInCol2 = (colIds2 V.! (col+1)) - (colIds2 V.! col)
-                  !elemsInCol1 = (colIds1 V.! (col+1)) - (colIds1 V.! col)
-                  goCol :: Int -> Int -> ST s ()
-                  goCol !i1 !i2 = do
-                    when (i2 < elemsInCol2) $ do
-                        let !row2 = rowIds2 V.! (valIdx2 + i2)
-                            !val2 = vals2 V.! (valIdx2 + i2)
-
-                            midx1 = V.findIndex (>= row2)
-                              (V.unsafeSlice (valIdx1+i1) elemsInCol1 rowIds1)
-
-                            (!val1, !nextIdx1) = case midx1 of
-                              Just i1'
-                                | rowIds1 V.! (valIdx1+i1+i1') == row2 ->
-                                    (vals1 V.! (valIdx1+i1+i1'), i1+i1'+1)
-                                | otherwise ->
-                                    (za, i1+i1')
-                              Nothing -> (za, i1)
-
-                        MV.unsafeWrite mv (valIdx2+i2) (f row2 col val1 val2)
-                        goCol nextIdx1 (i2+1)
-              goCol 0 0
-              go (col+1) (valIdx1+elemsInCol1) (valIdx2+elemsInCol2) mv
-
-{-# INLINE izipL #-}
--- an indexed-zip where the result will have the same structure as the 1st
--- Matrix argument
-izipL
-  :: forall (n :: Nat) (p :: Nat) a b c.
-     (MV.Unbox a, MV.Unbox b, MV.Unbox c)
-  => b
-  -> (Int -> Int -> a -> b -> c)
-  -> Matrix n p a
-  -> Matrix n p b
-  -> Matrix n p c
-izipL zb f m1 m2 = izipR zb (\i j a b -> f i j b a) m2 m1
-
-zipR
-  :: (MV.Unbox a, MV.Unbox b, MV.Unbox c)
-  => a
-  -> (a -> b -> c)
-  -> Matrix n p a
-  -> Matrix n p b
-  -> Matrix n p c
-zipR za f m1 m2 = izipR za (\_ _ a b -> f a b) m1 m2
-
-zipL
-  :: (MV.Unbox a, MV.Unbox b, MV.Unbox c)
-  => b
-  -> (a -> b -> c)
-  -> Matrix n p a
-  -> Matrix n p b
-  -> Matrix n p c
-zipL zb f m1 m2 = izipL zb (\_ _ a b -> f a b) m1 m2
-
-{-# INLINE izip #-}
--- an indexed-zip where the result will have the nonzero of structure
--- of the "union" of the two argument matrices (i.e an element will be
--- explicitly stored in the resulting matrix when either of the argument
--- matrices were explicitly storing the element at the given coordinate)
-
--- TODO: version that compresses on the fly?
---       with 'Int -> Int -> a -> b -> Maybe c' argument?
-izip
-  :: forall (n :: Nat) (p :: Nat) a b c.
-     (MV.Unbox a, MV.Unbox b, MV.Unbox c)
-  => a
-  -> b
-  -> (Int -> Int -> a -> b -> c)
-  -> Matrix n p a
-  -> Matrix n p b
-  -> Matrix n p c
-izip za zb f (Matrix m1) (Matrix m2) = Matrix $
-   M.Matrix
-  { M.ncols = ncols
-  , M.nrows = nrows
-  , M.pointers = cs
-  , M.indices = rs
-  , M.values = vs
-  }
-
-  where ncols = M.ncols m2
-        nrows = M.nrows m2
-        nvals1 = V.length vals1
-        nvals2 = V.length vals2
-        rowIds2 = M.indices m2
-        rowIds1 = M.indices m1
-        colIds1 = M.pointers m1
-        colIds2 = M.pointers m2
-        vals2 = M.values m2
-        vals1 = M.values m1
-        (rs, cs, vs) = runST $ do
-          mcs <- MV.unsafeNew (ncols+1)
-          mrs <- MV.unsafeNew (nvals1 + nvals2)
-          mvs <- MV.unsafeNew (nvals1 + nvals2)
-          MV.unsafeWrite mcs 0 0
-          nnz <- go 0 0 0 0 mrs mcs mvs
-          (,,) <$> V.unsafeFreeze (MV.unsafeSlice 0 nnz mrs)
-               <*> V.unsafeFreeze mcs
-               <*> V.unsafeFreeze (MV.unsafeSlice 0 nnz mvs)
-
-        go :: forall s.
-              Int -> Int -> Int -> Int
-           -> MV.MVector s Int
-           -> MV.MVector s Int
-           -> MV.MVector s c
-           -> ST s Int
-        go !nnz !col !valIdx1 !valIdx2 mrs mcs mvs
-          | (valIdx1 >= nvals1 && valIdx2 >= nvals2) = do
-              forM_ [(col+1)..ncols] $ \i -> MV.unsafeWrite mcs i nnz
-              return nnz
-
-          | (colIds1 V.! col) == (colIds1 V.! (col+1)) &&
-            (colIds2 V.! col) == (colIds2 V.! (col+1)) = do
-              MV.unsafeWrite mcs (col+1) nnz
-              go nnz (col+1) valIdx1 valIdx2 mrs mcs mvs
-
-          | otherwise = do
-              let !elemsInCol1 = (colIds1 V.! (col+1)) - (colIds1 V.! col)
-                  !elemsInCol2 = (colIds2 V.! (col+1)) - (colIds2 V.! col)
-                  rs1 = V.unsafeSlice valIdx1 elemsInCol1 rowIds1
-                  vs1 = V.unsafeSlice valIdx1 elemsInCol1 vals1
-                  rs2 = V.unsafeSlice valIdx2 elemsInCol2 rowIds2
-                  vs2 = V.unsafeSlice valIdx2 elemsInCol2 vals2
-                  goCol !i1 !i2 !nnzs
-                    | i1 < elemsInCol1 && i2 < elemsInCol2 = do
-                        let !r1 = rs1 V.! i1
-                            !r2 = rs2 V.! i2
-                        case compare r1 r2 of
-                          LT -> do
-                            MV.unsafeWrite mrs (nnz + nnzs) r1
-                            MV.unsafeWrite mvs (nnz + nnzs) $ f r1 col (vs1 V.! i1) zb
-                            goCol (i1+1) i2 (nnzs+1)
-                          GT -> do
-                            MV.unsafeWrite mrs (nnz + nnzs) r2
-                            MV.unsafeWrite mvs (nnz + nnzs) $ f r2 col za (vs2 V.! i2)
-                            goCol i1 (i2+1) (nnzs+1)
-                          EQ -> do
-                            MV.unsafeWrite mrs (nnz+nnzs) r1
-                            MV.unsafeWrite mvs (nnz + nnzs) $ f r1 col (vs1 V.! i1) (vs2 V.! i2)
-                            goCol (i1+1) (i2+1) (nnzs+1)
-                    | i1 < elemsInCol1 = do
-                        let remainingRows1 = V.unsafeSlice i1 (elemsInCol1 - i1) rs1
-                            remainingVals1 = V.unsafeSlice i1 (elemsInCol1 - i1) vs1
-                        V.izipWithM_ (\i r v -> MV.unsafeWrite mrs (nnz + nnzs + i) r
-                                             >> MV.unsafeWrite mvs (nnz + nnzs + i) (f r col v zb)
-                                     )
-                                     remainingRows1 remainingVals1
-                        return (nnzs + elemsInCol1 - i1)
-                    | otherwise = do
-                        let remainingRows2 = V.unsafeSlice i2 (elemsInCol2 - i2) rs2
-                            remainingVals2 = V.unsafeSlice i2 (elemsInCol2 - i2) vs2
-                        V.izipWithM_ (\i r v -> MV.unsafeWrite mrs (nnz + nnzs + i) r
-                                             >> MV.unsafeWrite mvs (nnz + nnzs + i) (f r col za v)
-                                     )
-                                     remainingRows2 remainingVals2
-                        return (nnzs + elemsInCol2 - i2)
-              nnz' <- goCol 0 0 0
-              MV.unsafeWrite mcs (col+1) (nnz + nnz')
-              go (nnz + nnz') (col+1) (valIdx1+elemsInCol1) (valIdx2+elemsInCol2) mrs mcs mvs
-
-zip
-  :: (MV.Unbox a, MV.Unbox b, MV.Unbox c)
-  => a
-  -> b
-  -> (a -> b -> c)
-  -> Matrix n p a
-  -> Matrix n p b
-  -> Matrix n p c
-zip za zb f m1 m2 = izip za zb (\_ _ a b -> f a b) m1 m2
+{-# INLINE add #-}
+add :: (Num a, MV.Unbox a) => Matrix n p a -> Matrix n p a -> Matrix n p a
+add (Matrix a) (Matrix b) = Matrix (a+b)
 
 {-# INLINE mul #-}
 mul
@@ -358,6 +149,13 @@ ident = Matrix $ M.Matrix
 extractCol :: MV.Unbox a => Matrix n p a -> Int -> SV.V n a
 extractCol (Matrix m) j = SV.V (M.unsafeSlice m j)
 
+extractDenseCol :: Matrix n p Double -> Int -> Dense.R n
+extractDenseCol m j = SV.toDense (extractCol m j)
+
+nnzCol :: Matrix n p a -> Int -> Int
+nnzCol (Matrix m) j = (ptrs V.! (j+1)) - (ptrs V.! j)
+  where ptrs = M.pointers m
+
 {-# INLINE transpose #-}
 transpose :: MV.Unbox a => Matrix n p a -> Matrix p n a
 transpose (Matrix m) = Matrix (M.transpose m)
@@ -381,9 +179,162 @@ getRows m = getCols (transpose m)
 sum :: (Num a, MV.Unbox a) => Matrix n p a -> a
 sum (Matrix m) = V.sum (M.values m)
 
+{-# INLINE zeroing #-}
+zeroing
+  :: (Num a, MV.Unbox a)
+  => Int -> Int -> Matrix n p a -> (Matrix n p a -> r) -> r
+zeroing i j mat@(Matrix m) f
+  | Just k <- V.findIndex (==i) s_ids = runST $ do
+      mvals <- V.unsafeThaw vals
+      val <- MV.unsafeRead mvals (beg+k)
+      MV.unsafeWrite mvals (beg+k) 0
+      vals' <- V.unsafeFreeze mvals
+      case f (Matrix $ m { M.values = vals' }) of
+        r -> MV.unsafeWrite mvals (beg+k) val >> return r
+  | otherwise = f mat
+
+  where ptrs = M.pointers m
+        ids  = M.indices m
+        vals = M.values m
+        beg  = ptrs V.! j
+        end  = ptrs V.! (j+1)
+        s_ids = V.unsafeSlice beg (end - beg) ids
+
+{-# INLINE asRow #-}
+asRow
+  :: forall (n :: Nat) a. (KnownNat n, Num a, MV.Unbox a)
+  => SV.V n a -> Matrix 1 n a
+asRow v = Matrix $ M.compress 1 n rows cols vals
+
+  where n  = SV.dim v
+        vals = SV.values v
+        nnz = SV.nnz v
+        rows = V.replicate nnz 0
+        cols = SV.indices v
+
+asColumn :: forall (n :: Nat) a. KnownNat n => SV.V n a -> Matrix n 1 a
+asColumn v = Matrix $ M.Matrix 1 n ptrs ids vs
+  where ids = SV.indices v
+        nnz = V.length ids
+        vs  = SV.values v
+        ptrs = V.fromList [0, nnz]
+        n   = fromIntegral $ natVal (Proxy :: Proxy n)
+
+dia :: forall (n :: Nat). KnownNat n => Dense.R n -> Matrix n n Double
+dia (Dense.R (Dense.Dim v)) = Matrix $ M.Matrix n n ptrs ids vs
+  where vs = VG.convert v
+        ptrs = V.enumFromTo 0 n
+        ids = V.enumFromTo 0 n
+        n = fromIntegral $ natVal (Proxy :: Proxy n)
+
+{-# INLINE at #-}
+at :: (MV.Unbox a, Num a) => Matrix n p a -> (Int, Int) -> a
+at m (i, j) = extractCol m j SV.! i
+
 {-# INLINE densify #-}
 densify
   :: forall (n :: Nat) (p :: Nat).
      (KnownNat n, KnownNat p)
   => Matrix n p Double -> Dense.L n p
 densify (Matrix m) = Dense.L . Dense.Dim . Dense.Dim $ M.pack m
+
+-- symmetric
+
+-- we just store the (strict) upper triangle (col > row) sparsely,
+-- + diagonal densely
+
+data Sym n = Sym
+  { diag :: !(Dense.R n)
+  , uptr :: !(Matrix n n Double)
+  } deriving Show
+
+{-# INLINE fromListSym #-}
+-- the 2nd arg should only include (i, j) pairs such that i < j
+fromListSym :: KnownNat n => [Double] -> [(Int, Int, Double)] -> Sym n
+fromListSym d rest = Sym d' u
+  where d' = Dense.fromList d
+        u = fromList rest
+
+{-# INLINE imapSym #-}
+imapSym :: (Int -> Int -> Double -> Double) -> Sym n -> Sym n
+imapSym f (Sym d u) = Sym (mapDiag d) (imap f u)
+  where mapDiag (Dense.R (Dense.Dim v)) = Dense.R $ Dense.Dim $
+          VS.imap (\i a -> f i i a) v
+
+{-# INLINE symNnzCol #-}
+symNnzCol :: Sym n -> Int -> Int
+symNnzCol (Sym (Dense.R (Dense.Dim d)) u) j =
+  (if d VS.! j /= 0 then 1 else 0) +
+  (nnzCol u j + nnzRowAfter u j j)
+
+-- how many non zero entries do we have in 'm' at row 'row',
+-- starting the count _after_ column 'col'
+{-# INLINE nnzRowAfter #-}
+nnzRowAfter :: Matrix n n a -> Int -> Int -> Int
+nnzRowAfter (Matrix m) row col = V.foldl' cnt 0 v
+
+  where startIdx = M.pointers m V.! (col+1)
+        len      = V.length (M.indices m)
+        v        = V.unsafeSlice startIdx (len - startIdx) (M.indices m)
+        cnt k rownum = if rownum == row then k+1 else k
+
+{-# INLINE symAt #-}
+symAt :: Sym n -> (Int, Int) -> Double
+symAt m (i, j)
+  | i < j = at (uptr m) (i, j)
+  | i == j = case diag m of
+      Dense.R (Dense.Dim v) -> v VS.! i
+  | otherwise = symAt m (j, i)
+
+{-# INLINE symNnz #-}
+symNnz :: Sym n -> Int
+symNnz m = nonZeros (uptr m) * 2 + VS.foldl' cnt 0 (unR $ diag m)
+  where cnt k v = if v /= 0 then k+1 else k
+        unR (Dense.R (Dense.Dim v)) = v
+
+{-# INLINE zeroingV #-}
+zeroingV :: Int -> Dense.R n -> (Dense.R n -> r) -> r
+zeroingV i (Dense.R (Dense.Dim v)) f = runST $ do
+  mv <- VS.unsafeThaw v
+  a  <- MVS.unsafeRead mv i
+  MVS.unsafeWrite mv i 0
+  v' <- VS.unsafeFreeze mv
+  case f (Dense.R (Dense.Dim v')) of
+    r -> MVS.unsafeWrite mv i a >> return r
+
+{-# INLINE zeroingSym #-}
+zeroingSym :: Int -> Int -> Sym n -> (Sym n -> r) -> r
+zeroingSym i j m@(Sym d u) f
+  | i < j = zeroing i j u $ \uptr' -> f (Sym d uptr')
+  | i == j = zeroingV i d $ \d' -> f (Sym d' u)
+  | otherwise = zeroingSym j i m f
+
+-- implements SssSpMVSerial from:
+--   https://kkourt.io/papers/ipdps13.pdf
+{-# INLINE mulVSym #-}
+mulVSym :: forall (n :: Nat). KnownNat n => Sym n -> Dense.R n -> Dense.R n
+mulVSym (Sym (Dense.R (Dense.Dim d)) (Matrix u)) (Dense.R (Dense.Dim v)) = runST $ do
+  out <- MVS.new n
+  forM_ [0..(n-1)] $ \r -> do
+    MVS.unsafeWrite out r $ (d VS.! r) * (v VS.! r)
+    forM_ [ (ptrs V.! r) .. ((ptrs V.! (r+1)) - 1) ] $ \j -> do
+      let c = ids V.! j
+      MVS.unsafeModify out (\a -> a + (vs V.! j) * (v VS.! c)) r
+      MVS.unsafeModify out (\a -> a + (vs V.! j) * (v VS.! r)) c
+  Dense.R . Dense.Dim <$> VS.unsafeFreeze out
+
+  where n = fromIntegral $ natVal (Proxy :: Proxy n)
+        ptrs = M.pointers u
+        ids  = M.indices u
+        vs   = M.values u
+
+{-# INLINE unSym #-}
+unSym :: KnownNat n => Sym n -> Matrix n n Double
+unSym (Sym d u) = dia d `add` u `add` transpose u
+
+{-# INLINE toListSym #-}
+toListSym
+  :: KnownNat n => Sym n -> [(Int, Int, Double)]
+toListSym (Sym (Dense.R (Dense.Dim d)) u) =
+  [ (i, i, a) | (i, a) <- Prelude.zip [0..] (VS.toList d) ] ++
+  concatMap (\(i, j, a) -> [(i, j, a), (j, i, a)]) (toList u)

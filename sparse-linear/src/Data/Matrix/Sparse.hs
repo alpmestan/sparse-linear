@@ -71,8 +71,8 @@ data Matrix v a = Matrix
   , pointers :: !(Vector Int)
                 -- ^ starting index of each slice,
                 -- last element is number of non-zero entries
-  , indices :: Vector Int
-  , values :: v a
+  , indices :: !(Vector Int)
+  , values :: !(v a)
   }
 
 deriving instance Eq (v a) => Eq (Matrix v a)
@@ -691,7 +691,7 @@ pack Matrix {..} =
 mm :: (Num a, Unbox a) => Matrix Vector a -> Matrix Vector a -> Matrix Vector a
 {-# INLINE mm #-}
 mm matA matB
-  | ncols matA /= nrows matB = oops "inner dimension mismatch"
+  | ncols matA /= nrows matB = oops $ "inner dimension mismatch: " ++ dims
   | otherwise = unsafeFromColumns $ SG.run (nrows matA) $ do
       Boxed.forM (toColumns matB) $ \colB -> do
         SG.reset 0
@@ -700,6 +700,7 @@ mm matA matB
         SG.gather
   where
     oops msg = error ("mm: " ++ msg)
+    dims = show (nrows matA, ncols matA) ++ " can't multiply " ++ show (nrows matB, ncols matB)
 
 subMatrix :: Unbox a =>
              (Int, Int) -> (Int, Int)

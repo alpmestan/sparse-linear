@@ -2,6 +2,7 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Data.Vector.Sparse.Static where
 
 import qualified Data.List           as L
@@ -16,8 +17,31 @@ import Data.Proxy
 newtype V (n :: Nat) a = V (V.Vector UV.Vector a)
   deriving (Eq, Show)
 
+dim :: forall (n :: Nat) a. KnownNat n => V n a -> Int
+dim _ = fromIntegral n
+  where n = natVal (Proxy :: Proxy n)
+
+values :: V n a -> UV.Vector a
+values (V v) = V.values v
+
+nnz :: UV.Unbox a => V n a -> Int
+nnz = UV.length . values
+
+indices :: V n a -> UV.Vector Int
+indices (V v) = V.indices v
+
+singleton :: forall (n :: Nat) a. (KnownNat n, UV.Unbox a) => Int -> a -> V n a
+singleton i a = V $ V.Vector n (UV.singleton i) (UV.singleton a)
+  where n = fromIntegral $ natVal (Proxy :: Proxy n)
+
+{-# INLINE add #-}
 add :: (Num a, UV.Unbox a) => V n a -> V n a -> V n a
-add (V a) (V b) = V (V.glin 0 (+) a (+) b)
+add (V a) (V b) = V (a+b)
+
+fromList
+  :: forall (n :: Nat) a. (KnownNat n, UV.Unbox a, Num a) => [(Int, a)] -> V n a
+fromList xs = V $ n V.|> xs
+  where n = fromIntegral $ natVal (Proxy :: Proxy n)
 
 sum :: forall (n :: Nat) a. (Num a, UV.Unbox a, KnownNat n) => [V n a] -> V n a
 sum xs = L.foldl' add z xs
@@ -32,6 +56,10 @@ map f (V a) = V (V.cmap f a)
 
 sumV :: (Num a, UV.Unbox a) => V n a -> a
 sumV (V v) = UV.sum (V.values v)
+
+{-# INLINE dot #-}
+dot :: (Num a, UV.Unbox a) => V n a -> V n a -> a
+dot (V u) (V v) = V.dot u v
 
 toDense :: V n Double -> R n
 toDense (V v) = withVector vec unsafeCoerce

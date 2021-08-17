@@ -37,7 +37,7 @@ newtype SG v s a b = SG (ReaderT (StateSG v s a) (ST s) b)
 run :: Vector v a => Int -> (forall s. SG v s a b) -> b
 {-# INLINE run #-}
 run len sg = runST $ do
-  pattern <- UM.new len
+  pattern <- UM.unsafeNew len
   values <- GM.new len
   let SG rdr = sg
   runReaderT rdr (StateSG pattern values)
@@ -118,7 +118,7 @@ gatherIndices :: Int -> SG v s a (U.Vector Int)
 gatherIndices pop = SG $ do
   StateSG pattern _ <- ask
   lift $ do
-    indices <- UM.new pop
+    indices <- UM.unsafeNew pop
     let gatherIndex !iIdx !iPat = do
           occupied <- UM.unsafeRead pattern iPat
           if not occupied
@@ -127,7 +127,7 @@ gatherIndices pop = SG $ do
               UM.unsafeWrite indices iIdx iPat
               return (iIdx + 1)
     _ <- U.foldM' gatherIndex 0 (U.enumFromN 0 (UM.length pattern))
-    U.freeze indices
+    U.unsafeFreeze indices
 
 gatherValues :: Vector v a => Int -> SG v s a (v a)
 {-# INLINE gatherValues #-}
@@ -144,4 +144,4 @@ gatherValues pop = SG $ do
               GM.unsafeWrite values iVal x
               return (iVal + 1)
     _ <- U.foldM' gatherValue 0 (U.enumFromN 0 (UM.length pattern))
-    G.freeze values
+    G.unsafeFreeze values
