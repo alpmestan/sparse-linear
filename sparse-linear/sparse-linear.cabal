@@ -53,3 +53,9 @@ test-suite sparse
     , reflection
     , sparse-linear
     , vector >=0.10 && <1
+
+executable bench
+  main-is: Main.hs
+  hs-source-dirs: bench
+  ghc-options: -O2 -Wall -msse2 -fsimpl-tick-factor=10000 -fdicts-cheap -fdicts-strict -flate-dmd-anal  -fno-state-hack  -fspecialise-aggressively  -flate-specialise
+  build-depends: base, criterion, hmatrix, random, reflection, sparse-linear

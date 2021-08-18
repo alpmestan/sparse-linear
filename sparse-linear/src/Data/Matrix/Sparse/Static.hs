@@ -19,9 +19,28 @@ import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Storable.Mutable as MVS
 import qualified Data.Vector.Generic as VG
 import Control.Monad (forM_)
+import qualified Data.List as L
 
 newtype Matrix (n :: Nat) (p :: Nat) a = Matrix (M.Matrix V.Vector a)
   deriving (Eq, Show, Read)
+
+pp
+  :: forall (n :: Nat) (p :: Nat) a.
+     (KnownNat n, KnownNat p, Show a, MV.Unbox a, Num a)
+  => Matrix n p a -> String
+pp m =
+  L.intercalate "\n" $
+    map (L.intercalate " ") nums'
+
+  where nums = [ let xs = [ show (m `at` (i, j)) | i <- [0..(n-1)] ]
+                     maxl = maximum (map length xs)
+                 in map (pad maxl) xs
+               | j <- [0..(p-1)]
+               ]
+        nums' = L.transpose nums
+        n = fromIntegral $ natVal (Proxy :: Proxy n)
+        p = fromIntegral $ natVal (Proxy :: Proxy p)
+        pad maxlen s = s ++ replicate (maxlen - length s) ' '
 
 type instance Element (Matrix n p a) = a
 
@@ -132,6 +151,11 @@ mul
   => Matrix n p a -> Matrix p q a -> Matrix n q a
 mul (Matrix a) (Matrix b) = Matrix (a * b)
 
+{-# INLINE mulV #-}
+mulV
+  :: Matrix n p Double -> Dense.R p -> Dense.R n
+mulV (Matrix m) (Dense.R (Dense.Dim v)) = Dense.R . Dense.Dim $ M.mulV m v
+
 nonZeros :: MV.Unbox a => Matrix n p a -> Int
 nonZeros (Matrix m) = V.length (M.values m)
 
@@ -178,6 +202,27 @@ getRows m = getCols (transpose m)
 {-# INLINE sum #-}
 sum :: (Num a, MV.Unbox a) => Matrix n p a -> a
 sum (Matrix m) = V.sum (M.values m)
+
+{-# INLINE withColChangeExcept #-}
+-- set all non-zeros of column j to given value within the given scope,
+-- except at row i where the value is considered to be 0
+withColChangeExcept
+  :: (Num a, MV.Unbox a, Show a) => Int -> a -> Int -> Matrix n p a -> (Matrix n p a -> r) -> r
+withColChangeExcept j newVal i (Matrix m) f = runST $ do
+  mvals <- V.unsafeThaw vals
+  let mvals_j = MV.unsafeSlice beg (end - beg) mvals
+  mvals_j_save <- MV.clone mvals_j
+  forM_ [beg..(end-1)] $ \k ->
+    MV.unsafeWrite mvals k $ if ids V.! k == i then 0 else newVal
+  vals' <- V.unsafeFreeze mvals
+  case f (Matrix $ m { M.values = vals' }) of
+    !r -> MV.unsafeCopy mvals_j mvals_j_save >> return r
+
+  where ptrs = M.pointers m
+        ids  = M.indices m
+        vals = M.values m
+        beg  = ptrs V.! j
+        end  = ptrs V.! (j+1)
 
 {-# INLINE zeroing #-}
 zeroing
