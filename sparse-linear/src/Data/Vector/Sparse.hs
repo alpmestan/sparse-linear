@@ -33,10 +33,30 @@ data Vector v a
            }
   deriving (Eq, Show)
 
+-- (!) :: (G.Vector v a, Num a) => Vector v a -> Int -> a
+-- (!) v i = case U.findIndex (==i) (indices v) of
+--   Nothing -> 0
+--   Just ix -> values v G.! ix
+
+{-# INLINE (!) #-}
 (!) :: (G.Vector v a, Num a) => Vector v a -> Int -> a
-(!) v i = case U.findIndex (==i) (indices v) of
+(!) v i = case bsearch i ids of
+  Just k  -> vs G.! k
   Nothing -> 0
-  Just ix -> values v G.! ix
+
+  where ids = indices v
+        vs  = values v
+
+bsearch :: Int -> U.Vector Int -> Maybe Int
+bsearch i v = go 0 (U.length v - 1)
+  where go l r
+          | l > r = Nothing
+          | otherwise =
+              let mid = (l+r) `div` 2 in
+                case compare i (v U.! mid) of
+                  LT -> go l       (mid-1)
+                  GT -> go (mid+1) r
+                  EQ -> Just mid
 
 null :: Vector v a -> Bool
 {-# INLINE null #-}
